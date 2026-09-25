@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -72,13 +71,3 @@ class SyncService:
                 logger.exception("Events synchronization failed")
                 await self.sync_repo.mark_failed(error)
                 raise
-
-
-async def run_daily(service: SyncService, stop: asyncio.Event) -> None:
-    """Run immediately, then every 24 hours until stopped."""
-    while not stop.is_set():
-        await service.run()
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=24 * 60 * 60)
-        except TimeoutError:
-            pass
