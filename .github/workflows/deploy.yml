@@ -4,9 +4,56 @@ on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: events
+          POSTGRES_PASSWORD: events
+          POSTGRES_DB: events_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U events -d events_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://events:events@localhost:5432/events_test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Check lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Run tests
+        run: uv run pytest
+
   build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: checks
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.meta.outputs.tags }}
@@ -53,16 +100,21 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [checks, build]
     runs-on: ubuntu-latest
 
     steps:
       - name: Send deploy request
+        env:
+          LMS_API_KEY: ${{ secrets.LMS_API_KEY }}
+          IMAGE: ghcr.io/${{ needs.build.outputs.repo }}:${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           HTTP_CODE=$(curl -s -o response.txt -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ secrets.LMS_API_KEY }}" \
-            -d '{"image":"ghcr.io/${{ needs.build.outputs.repo }}:${{ github.sha }}","repository":"${{ github.repository }}"}' \
+            -H "X-API-Key: $LMS_API_KEY" \
+            -d "{\"image\":\"$IMAGE\",\"repository\":\"$REPOSITORY\"}" \
             https://lms.python-labs.ru/api/deploy-requests)
 
           if [ "$HTTP_CODE" != "200" ]; then
