@@ -21,6 +21,8 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from .statuses import EventStatus, SyncStatus
+
 
 class Base(DeclarativeBase):
     pass
@@ -44,7 +46,7 @@ class Event(Base):
     registration_deadline: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
-    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[EventStatus | str] = mapped_column(String(64), nullable=False)
     number_of_visitors: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     changed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -78,7 +80,7 @@ class SyncState(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     last_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sync_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    sync_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    sync_status: Mapped[SyncStatus] = mapped_column(String(32), nullable=False)
     sync_error: Mapped[str | None] = mapped_column(Text)
 
 
@@ -87,7 +89,7 @@ async def create_schema(engine: AsyncEngine) -> None:
         await connection.run_sync(Base.metadata.create_all)
 
 
-def _timestamp(value: Any) -> datetime | None:
+def timestamp(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
@@ -103,6 +105,14 @@ def _timestamp(value: Any) -> datetime | None:
     )
 
 
+def _event_status(value: str) -> EventStatus | str:
+    try:
+        return EventStatus(value)
+    except ValueError:
+        # The provider may add a status before this service knows its meaning.
+        return value
+
+
 def _event_values(data: dict[str, Any]) -> dict[str, Any]:
     place = data.get("place") or {}
     if not isinstance(place, dict):
@@ -115,15 +125,15 @@ def _event_values(data: dict[str, Any]) -> dict[str, Any]:
         "place_city": place.get("city"),
         "place_address": place.get("address"),
         "place_seats_pattern": place.get("seats_pattern"),
-        "place_created_at": _timestamp(place.get("created_at")),
-        "place_changed_at": _timestamp(place.get("changed_at")),
-        "event_time": _timestamp(data["event_time"]),
-        "registration_deadline": _timestamp(data.get("registration_deadline")),
-        "status": data["status"],
+        "place_created_at": timestamp(place.get("created_at")),
+        "place_changed_at": timestamp(place.get("changed_at")),
+        "event_time": timestamp(data["event_time"]),
+        "registration_deadline": timestamp(data.get("registration_deadline")),
+        "status": _event_status(data["status"]),
         "number_of_visitors": data.get("number_of_visitors", 0),
-        "changed_at": _timestamp(data["changed_at"]),
-        "created_at": _timestamp(data.get("created_at")),
-        "status_changed_at": _timestamp(data.get("status_changed_at")),
+        "changed_at": timestamp(data["changed_at"]),
+        "created_at": timestamp(data.get("created_at")),
+        "status_changed_at": timestamp(data.get("status_changed_at")),
     }
     if values["event_time"] is None or values["changed_at"] is None:
         raise ValueError("event_time and changed_at are required")
@@ -139,22 +149,22 @@ def _event_dict(event: Event, *, detail: bool = True) -> dict[str, Any]:
     }
     if detail:
         place["seats_pattern"] = event.place_seats_pattern
-        place["created_at"] = _timestamp(event.place_created_at)
-        place["changed_at"] = _timestamp(event.place_changed_at)
+        place["created_at"] = timestamp(event.place_created_at)
+        place["changed_at"] = timestamp(event.place_changed_at)
     result = {
         "id": event.id,
         "name": event.name,
         "place": place,
-        "event_time": _timestamp(event.event_time),
-        "registration_deadline": _timestamp(event.registration_deadline),
-        "status": event.status,
+        "event_time": timestamp(event.event_time),
+        "registration_deadline": timestamp(event.registration_deadline),
+        "status": _event_status(event.status),
         "number_of_visitors": event.number_of_visitors,
     }
     if detail:
         result.update(
-            changed_at=_timestamp(event.changed_at),
-            created_at=_timestamp(event.created_at),
-            status_changed_at=_timestamp(event.status_changed_at),
+            changed_at=timestamp(event.changed_at),
+            created_at=timestamp(event.created_at),
+            status_changed_at=timestamp(event.status_changed_at),
         )
     return result
 
@@ -171,7 +181,7 @@ class EventRepository:
     ) -> tuple[int, list[dict[str, Any]]]:
         if page < 1 or page_size < 1:
             raise ValueError("page and page_size must be positive")
-        start = _timestamp(date_from)
+        start = timestamp(date_from)
         async with self.sessions() as session:
             count_query = select(func.count()).select_from(Event)
             rows_query = select(Event)
@@ -207,7 +217,7 @@ class EventRepository:
                 event = await session.get(Event, values["id"])
                 if event is None:
                     session.add(Event(**values))
-                elif _timestamp(event.changed_at) <= values["changed_at"]:
+                elif timestamp(event.changed_at) <= values["changed_at"]:
                     for key, value in values.items():
                         setattr(event, key, value)
 
@@ -302,7 +312,7 @@ class SyncRepository:
     async def get_state(self) -> datetime | None:
         async with self.sessions() as session:
             row = await session.get(SyncState, self.KEY)
-            return _timestamp(row.last_changed_at) if row else None
+            return timestamp(row.last_changed_at) if row else None
 
     async def get_metadata(self) -> dict[str, Any] | None:
         async with self.sessions() as session:
@@ -310,9 +320,9 @@ class SyncRepository:
             if row is None:
                 return None
             return {
-                "last_changed_at": _timestamp(row.last_changed_at),
-                "last_sync_time": _timestamp(row.last_sync_time),
-                "sync_status": row.sync_status,
+                "last_changed_at": timestamp(row.last_changed_at),
+                "last_sync_time": timestamp(row.last_sync_time),
+                "sync_status": SyncStatus(row.sync_status),
                 "sync_error": row.sync_error,
             }
 
@@ -320,23 +330,23 @@ class SyncRepository:
         async with self.sessions.begin() as session:
             row = await session.get(SyncState, self.KEY)
             if row is None:
-                session.add(SyncState(key=self.KEY, sync_status="running"))
+                session.add(SyncState(key=self.KEY, sync_status=SyncStatus.RUNNING))
             else:
-                row.sync_status = "running"
+                row.sync_status = SyncStatus.RUNNING
                 row.sync_error = None
 
     async def mark_succeeded(self, last_changed_at: datetime | None) -> None:
-        value = _timestamp(last_changed_at)
+        value = timestamp(last_changed_at)
         async with self.sessions.begin() as session:
             row = await session.get(SyncState, self.KEY)
             if row is None:
-                row = SyncState(key=self.KEY, sync_status="success")
+                row = SyncState(key=self.KEY, sync_status=SyncStatus.SUCCESS)
                 session.add(row)
             row.last_sync_time = datetime.now(UTC)
-            row.sync_status = "success"
+            row.sync_status = SyncStatus.SUCCESS
             row.sync_error = None
             if value is not None and (
-                row.last_changed_at is None or _timestamp(row.last_changed_at) < value
+                row.last_changed_at is None or timestamp(row.last_changed_at) < value
             ):
                 row.last_changed_at = value
 
@@ -344,21 +354,8 @@ class SyncRepository:
         async with self.sessions.begin() as session:
             row = await session.get(SyncState, self.KEY)
             if row is None:
-                row = SyncState(key=self.KEY, sync_status="failed")
+                row = SyncState(key=self.KEY, sync_status=SyncStatus.FAILED)
                 session.add(row)
             row.last_sync_time = datetime.now(UTC)
-            row.sync_status = "failed"
+            row.sync_status = SyncStatus.FAILED
             row.sync_error = f"{type(error).__name__}: {error}"[:1000]
-
-    async def set_state(self, last_changed_at: datetime) -> None:
-        value = _timestamp(last_changed_at)
-        if value is None:
-            raise ValueError("last_changed_at is required")
-        async with self.sessions.begin() as session:
-            row = await session.get(SyncState, self.KEY)
-            if row is None:
-                session.add(
-                    SyncState(key=self.KEY, last_changed_at=value, sync_status="idle")
-                )
-            elif row.last_changed_at is None or _timestamp(row.last_changed_at) < value:
-                row.last_changed_at = value

@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from events_aggregator.provider import ProviderError
+from events_aggregator.statuses import EventStatus, SyncStatus
 from events_aggregator.storage import (
     EventRepository,
     SyncRepository,
@@ -146,7 +147,7 @@ async def test_repositories_persist_events_tickets_and_sync_metadata():
             },
             "event_time": "2026-10-01T18:00:00Z",
             "registration_deadline": "2026-10-01T17:00:00Z",
-            "status": "published",
+            "status": EventStatus.PUBLISHED,
             "number_of_visitors": 3,
             "changed_at": "2026-09-25T08:00:00Z",
         }
@@ -161,6 +162,18 @@ async def test_repositories_persist_events_tickets_and_sync_metadata():
             "address": "Street 1",
         }
         assert (await events.get("event-1"))["place"]["seats_pattern"] == "A1-20"
+        assert (await events.get("event-1"))["status"] is EventStatus.PUBLISHED
+        # Unknown upstream values remain available to clients after a sync.
+        await events.upsert_many(
+            [
+                {
+                    **provider_event,
+                    "status": "provider-added",
+                    "changed_at": "2026-09-25T09:00:00Z",
+                }
+            ]
+        )
+        assert (await events.get("event-1"))["status"] == "provider-added"
         await tickets.create("event-1", "ticket-1", "Ana", "Doe", "a@b.test", "A15")
         assert (await tickets.get("ticket-1"))["seat"] == "A15"
         assert await tickets.delete("ticket-1") is True
@@ -168,12 +181,12 @@ async def test_repositories_persist_events_tickets_and_sync_metadata():
 
         await state.mark_started()
         await state.mark_failed(ProviderError("unavailable"))
-        assert (await state.get_metadata())["sync_status"] == "failed"
+        assert (await state.get_metadata())["sync_status"] is SyncStatus.FAILED
         assert await state.get_state() is None
         await state.mark_started()
         await state.mark_succeeded(datetime(2026, 9, 25, 8, tzinfo=UTC))
         metadata = await state.get_metadata()
-        assert metadata["sync_status"] == "success"
+        assert metadata["sync_status"] is SyncStatus.SUCCESS
         assert metadata["last_changed_at"] == datetime(2026, 9, 25, 8, tzinfo=UTC)
         assert metadata["last_sync_time"] is not None
     finally:

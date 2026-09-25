@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from datetime import date
 
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from events_aggregator.provider import EventsProviderClient, ProviderError
 from events_aggregator.services import DomainError, SeatsCache, TicketService
+from events_aggregator.settings import Settings
 from events_aggregator.storage import (
     EventRepository,
     SyncRepository,
@@ -43,17 +43,8 @@ class TicketCreate(BaseModel):
         return value
 
 
-def _database_url() -> str:
-    value = os.getenv("DATABASE_URL") or os.environ["POSTGRES_CONNECTION_STRING"]
-    if value.startswith("postgres://"):
-        value = "postgresql+asyncpg://" + value[len("postgres://") :]
-    elif value.startswith("postgresql://"):
-        value = "postgresql+asyncpg://" + value[len("postgresql://") :]
-    return value
-
-
 async def _daily_sync(app: FastAPI) -> None:
-    interval = int(os.getenv("SYNC_INTERVAL_SECONDS", "86400"))
+    interval = app.state.settings.sync_interval_seconds
     while True:
         try:
             async with app.state.sync_lock:
@@ -65,21 +56,20 @@ async def _daily_sync(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    settings = Settings()
+    logging.basicConfig(level=settings.log_level)
+    engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
     await create_schema(engine)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     provider = EventsProviderClient(
-        os.environ["EVENTS_PROVIDER_API_KEY"],
-        os.getenv(
-            "EVENTS_PROVIDER_BASE_URL",
-            "http://student-system-events-provider-web.student-system-events-provider.svc:8000",
-        ),
+        settings.events_provider_api_key.get_secret_value(),
+        settings.events_provider_base_url,
     )
     events = EventRepository(sessions)
     tickets = TicketRepository(sessions)
     sync_state = SyncRepository(sessions)
     app.state.engine = engine
+    app.state.settings = settings
     app.state.events = events
     app.state.ticket_service = TicketService(events, tickets, provider, SeatsCache())
     app.state.sync_service = SyncService(events, sync_state, provider)

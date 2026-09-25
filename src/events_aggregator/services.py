@@ -6,6 +6,8 @@ import time
 from datetime import UTC, datetime
 from typing import Protocol
 
+from .statuses import EventStatus
+
 
 class DomainError(Exception):
     def __init__(self, message: str, status_code: int) -> None:
@@ -108,7 +110,7 @@ class TicketService:
         event = await self.events.get(event_id)
         if event is None:
             raise DomainError("Event not found", 404)
-        if event["status"] != "published":
+        if event["status"] != EventStatus.PUBLISHED:
             raise DomainError("Event is not published", 409)
         return await self.seats_cache.get(event_id, self.provider)
 
@@ -123,7 +125,7 @@ class TicketService:
         event = await self.events.get(event_id)
         if event is None:
             raise DomainError("Event not found", 404)
-        if event["status"] != "published":
+        if event["status"] != EventStatus.PUBLISHED:
             raise DomainError("Event is not published", 409)
         deadline = _parse_datetime(event["registration_deadline"])
         if datetime.now(UTC) >= deadline:

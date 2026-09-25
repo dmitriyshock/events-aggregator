@@ -8,7 +8,7 @@ from datetime import date, datetime
 from typing import Any
 
 from .provider import EventsPaginator, EventsProviderClient
-from .storage import EventRepository, SyncRepository, _timestamp
+from .storage import EventRepository, SyncRepository, timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class SyncService:
 
                 async for event in EventsPaginator(self.client, changed_at_date):
                     # Fail before persisting a malformed item or advancing the marker.
-                    changed_at = _timestamp(event.get("changed_at"))
+                    changed_at = timestamp(event.get("changed_at"))
                     if changed_at is None:
                         raise ValueError("Provider event has no changed_at")
                     latest = max(latest, changed_at) if latest else changed_at

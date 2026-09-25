@@ -15,7 +15,8 @@ Set these environment variables before running the service:
 - `DATABASE_URL` or `POSTGRES_CONNECTION_STRING` — PostgreSQL URL, such as `postgresql+asyncpg://user:password@localhost:5432/events`. The LMS `events-aggregator` template provides `POSTGRES_CONNECTION_STRING`.
 - `EVENTS_PROVIDER_API_KEY` — API key for the events provider. Keep it secret and never return it from the API.
 - `EVENTS_PROVIDER_BASE_URL` — provider API base URL. The default is the internal cluster address; for local development set `http://events-provider.dev-2.python-labs.ru`.
-- `SYNC_INTERVAL_SECONDS` — optional automatic sync interval.
+- `SYNC_INTERVAL_SECONDS` — optional automatic sync interval in seconds (positive integer; default `86400`).
+- `LOG_LEVEL` — optional logging level (default `INFO`).
 
 Run the API locally:
 
