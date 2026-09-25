@@ -41,7 +41,7 @@ class TicketCreate(BaseModel):
 
 
 def _database_url() -> str:
-    value = os.environ["DATABASE_URL"]
+    value = os.getenv("DATABASE_URL") or os.environ["POSTGRES_CONNECTION_STRING"]
     if value.startswith("postgres://"):
         value = "postgresql+asyncpg://" + value[len("postgres://") :]
     elif value.startswith("postgresql://"):
