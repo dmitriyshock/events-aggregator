@@ -7,6 +7,9 @@ from contextlib import asynccontextmanager
 from datetime import date
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -97,17 +100,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Events Aggregator", lifespan=lifespan)
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    _request: Request, exc: RequestValidationError
+):
+    return JSONResponse({"detail": jsonable_encoder(exc.errors())}, status_code=400)
+
+
 @app.exception_handler(DomainError)
 async def domain_error_handler(_request: Request, exc: DomainError):
-    from fastapi.responses import JSONResponse
-
     return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
 
 
 @app.exception_handler(ProviderError)
 async def provider_error_handler(_request: Request, exc: ProviderError):
-    from fastapi.responses import JSONResponse
-
     status = 404 if exc.status_code == 404 else 409 if exc.status_code == 400 else 502
     return JSONResponse({"detail": str(exc)}, status_code=status)
 

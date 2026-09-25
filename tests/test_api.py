@@ -58,7 +58,7 @@ async def test_ticket_creation_validates_email_before_calling_service():
                 "seat": "A1",
             },
         )
-    assert bad.status_code == 422
+    assert bad.status_code == 400
     assert good.status_code == 201
     assert good.json() == {"ticket_id": "ticket-1"}
     ticket_service.register.assert_awaited_once_with(
