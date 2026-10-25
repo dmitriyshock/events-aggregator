@@ -1,11 +1,12 @@
 """HTTP API and application lifecycle."""
 
 import asyncio
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from datetime import date
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -14,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from events_aggregator.idempotency import IdempotencyRepository
+from events_aggregator.monitoring import configure_monitoring
 from events_aggregator.notifications import CapashinoClient
 from events_aggregator.outbox import OutboxWorker, PendingNotificationSender
 from events_aggregator.provider import EventsProviderClient, ProviderError
@@ -69,6 +71,7 @@ async def _daily_sync(app: FastAPI) -> None:
 async def lifespan(app: FastAPI):
     settings = Settings()
     logging.basicConfig(level=settings.log_level)
+    configure_monitoring(settings)
     engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
     await create_schema(engine)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -125,6 +128,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Events Aggregator", lifespan=lifespan)
+
+
+@app.get("/api/debug/error", include_in_schema=True)
+async def debug_error(request: Request, x_api_key: str | None = Header(default=None)):
+    settings = request.app.state.settings
+    if not settings.enable_error_test_endpoint or not hmac.compare_digest(
+        (x_api_key or "").encode(),
+        settings.events_provider_api_key.get_secret_value().encode(),
+    ):
+        raise HTTPException(status_code=404, detail="Not found")
+    raise RuntimeError("Events Aggregator GlitchTip verification")
 
 
 @app.exception_handler(RequestValidationError)

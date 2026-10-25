@@ -12,6 +12,10 @@ uv sync
 
 Set these environment variables before running the service:
 
+For local development, `.env.example` lists all settings with placeholder
+credentials. Copy it to `.env` and pass it explicitly with `uv run --env-file .env`.
+The production container reads its environment directly from LMS.
+
 - `DATABASE_URL` or `POSTGRES_CONNECTION_STRING` — PostgreSQL URL, such as `postgresql+asyncpg://user:password@localhost:5432/events`. The LMS `events-aggregator` template provides `POSTGRES_CONNECTION_STRING`.
 - `EVENTS_PROVIDER_API_KEY` — API key for the events provider. Keep it secret and never return it from the API.
 - `EVENTS_PROVIDER_BASE_URL` — provider API base URL. The default is the internal cluster address; for local development set `http://events-provider.dev-2.python-labs.ru`.
@@ -101,6 +105,26 @@ the local purchase transaction commits.
 - `GET /api/events/{event_id}/seats` — event seat availability.
 - `POST /api/tickets` — reserve tickets.
 - `DELETE /api/tickets/{ticket_id}` — cancel a ticket reservation.
+
+## GlitchTip
+
+Request the `glitchtip` resource on the new LMS service's Resources tab. After
+approval, provision the service again if requested by the platform. The platform
+adds `SENTRY_DSN` to its environment; `GLITCHTIP_DSN` is also accepted. Redeploy
+after configuration changes. Never put the DSN or API tokens in the repository.
+
+The Sentry SDK is initialized during application startup with explicit FastAPI
+and Starlette integrations. Unhandled request exceptions are captured
+automatically. Request bodies, local variables, cookies and API key headers are
+excluded from error events. `APP_ENVIRONMENT` defaults to `production` and
+`APP_RELEASE` may identify the deployed version. Performance tracing is disabled.
+
+For verification, temporarily set `ENABLE_ERROR_TEST_ENDPOINT=true` and redeploy.
+Call `GET /api/debug/error` with `X-API-Key` set to the service's provider API key.
+The deliberate HTTP 500 should appear in the service's GlitchTip project as
+`Events Aggregator GlitchTip verification`. Set the flag back to `false` and
+redeploy after confirming it in the UI. The endpoint returns 404 when disabled
+or when the key does not match.
 
 ## Checks
 
