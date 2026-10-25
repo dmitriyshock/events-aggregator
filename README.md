@@ -57,6 +57,43 @@ the outbox until configuration is supplied and the service restarted.
 
 ## API endpoints
 
+### Idempotent ticket registration
+
+`POST /api/tickets` accepts an optional `idempotency_key` in its JSON body:
+
+```json
+{
+  "event_id": "event-uuid",
+  "first_name": "Ada",
+  "last_name": "Lovelace",
+  "email": "ada@example.com",
+  "seat": "A1",
+  "idempotency_key": "client-generated-unique-key"
+}
+```
+
+The key must be a nonblank string of 1–255 characters. Repeating the same key
+and registration data returns HTTP 201 with the original `ticket_id`, without
+calling Events Provider or producing another outbox event. Changed registration
+data with an existing key returns HTTP 409. Validation failures return HTTP 400.
+Without a key, every request is a new registration, preserving part 1 behavior.
+
+PostgreSQL transaction advisory locks serialize parallel requests for the same
+key across API instances. The successful result, ticket and outbox record commit
+in the same local transaction. Provider failures leave the key reusable.
+`IDEMPOTENCY_TTL_SECONDS` sets retention (86400 seconds by default). Expired keys
+are replaced only on a new successful registration; no automatic purge is needed.
+Clients must use a new key for a different purchase and avoid reusing expired keys
+to retry an old purchase. Request comparison uses validated registration values.
+
+The upstream registration API does not offer a transaction shared with our
+database. A hard process kill after upstream registration but before the local
+commit still requires reconciliation; normal local persistence failures trigger
+an upstream cancellation. The outbox covers durable notification delivery once
+the local purchase transaction commits.
+
+### Endpoints
+
 - `GET /api/health` — service health.
 - `POST /api/sync/trigger` — trigger event synchronization.
 - `GET /api/events` — list events.

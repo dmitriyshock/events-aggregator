@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     )
     capashino_api_key: SecretStr | None = None
     capashino_timeout_seconds: float = Field(default=10, gt=0)
+    idempotency_ttl_seconds: int = Field(default=86400, ge=1)
 
     @property
     def async_database_url(self) -> str:

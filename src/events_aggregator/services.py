@@ -3,6 +3,7 @@
 import asyncio
 import re
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -33,6 +34,15 @@ class TicketStore(Protocol):
     async def get(self, ticket_id: str) -> dict | None: ...
 
     async def delete(self, ticket_id: str) -> None: ...
+
+
+class IdempotencyStore(Protocol):
+    async def execute(
+        self,
+        key: str,
+        request_data: dict,
+        operation: Callable[[TicketStore], Awaitable[str]],
+    ) -> str: ...
 
 
 class Provider(Protocol):
@@ -100,11 +110,13 @@ class TicketService:
         tickets: TicketStore,
         provider: Provider,
         seats_cache: SeatsCache,
+        idempotency: IdempotencyStore | None = None,
     ) -> None:
         self.events = events
         self.tickets = tickets
         self.provider = provider
         self.seats_cache = seats_cache
+        self.idempotency = idempotency
 
     async def available_seats(self, event_id: str) -> list[str]:
         event = await self.events.get(event_id)
@@ -121,8 +133,54 @@ class TicketService:
         last_name: str,
         email: str,
         seat: str,
+        *,
+        idempotency_key: str | None = None,
     ) -> str:
+        # Read before acquiring a keyed transaction's connection. Waiting keyed
+        # requests must not exhaust the pool needed for separate catalogue reads.
         event = await self.events.get(event_id)
+        if idempotency_key is None:
+            return await self._register(
+                event_id, first_name, last_name, email, seat, self.tickets, event
+            )
+        if self.idempotency is None:
+            raise RuntimeError("Idempotency storage is unavailable")
+        created_id = None
+
+        async def create(tickets: TicketStore) -> str:
+            nonlocal created_id
+            created_id = await self._register(
+                event_id, first_name, last_name, email, seat, tickets, event
+            )
+            return created_id
+
+        try:
+            return await self.idempotency.execute(
+                idempotency_key,
+                {
+                    "event_id": event_id,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": email,
+                    "seat": seat,
+                },
+                create,
+            )
+        except (Exception, asyncio.CancelledError):
+            if created_id is not None:
+                await self.provider.unregister(event_id, created_id)
+            raise
+
+    async def _register(
+        self,
+        event_id: str,
+        first_name: str,
+        last_name: str,
+        email: str,
+        seat: str,
+        tickets: TicketStore,
+        event: dict | None,
+    ) -> str:
         if event is None:
             raise DomainError("Event not found", 404)
         if event["status"] != EventStatus.PUBLISHED:
@@ -140,10 +198,10 @@ class TicketService:
             event_id, first_name, last_name, email, seat
         )
         try:
-            await self.tickets.create(
+            await tickets.create(
                 event_id, ticket_id, first_name, last_name, email, seat
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # Keep provider and local state aligned if local persistence fails.
             await self.provider.unregister(event_id, ticket_id)
             raise

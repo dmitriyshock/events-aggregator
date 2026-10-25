@@ -107,6 +107,20 @@ class OutboxEvent(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_keys"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ticket_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
 async def create_schema(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -258,11 +272,42 @@ def _ticket_dict(ticket: Ticket) -> dict[str, Any]:
 
 
 class TicketRepository:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        transaction: AsyncSession | None = None,
+    ):
         self.sessions = sessions
+        self.transaction = transaction
 
     async def create(
         self,
+        event_id: str,
+        ticket_id: str,
+        first_name: str,
+        last_name: str,
+        email: str,
+        seat: str,
+    ) -> dict[str, Any]:
+        if self.transaction is not None:
+            return await self._create(
+                self.transaction,
+                event_id,
+                ticket_id,
+                first_name,
+                last_name,
+                email,
+                seat,
+            )
+        async with self.sessions.begin() as session:
+            return await self._create(
+                session, event_id, ticket_id, first_name, last_name, email, seat
+            )
+
+    async def _create(
+        self,
+        session: AsyncSession,
         event_id: str,
         ticket_id: str,
         first_name: str,
@@ -278,30 +323,29 @@ class TicketRepository:
             email=email,
             seat=seat,
         )
-        async with self.sessions.begin() as session:
-            event = await session.get(Event, str(event_id))
-            event_name = event.name if event else str(event_id)
-            outbox_id = str(uuid4())
-            session.add(ticket)
-            session.add(
-                OutboxEvent(
-                    id=outbox_id,
-                    event_type="ticket.purchased",
-                    payload={
-                        "ticket_id": str(ticket_id),
-                        "event_id": str(event_id),
-                        "event_name": event_name,
-                        "seat": seat,
-                        "message": (
-                            "Вы успешно зарегистрированы на мероприятие — "
-                            f"{event_name}. Место: {seat}."
-                        ),
-                        "idempotency_key": outbox_id,
-                    },
-                )
+        event = await session.get(Event, str(event_id))
+        event_name = event.name if event else str(event_id)
+        outbox_id = str(uuid4())
+        session.add(ticket)
+        session.add(
+            OutboxEvent(
+                id=outbox_id,
+                event_type="ticket.purchased",
+                payload={
+                    "ticket_id": str(ticket_id),
+                    "event_id": str(event_id),
+                    "event_name": event_name,
+                    "seat": seat,
+                    "message": (
+                        "Вы успешно зарегистрированы на мероприятие — "
+                        f"{event_name}. Место: {seat}."
+                    ),
+                    "idempotency_key": outbox_id,
+                },
             )
-            await session.flush()
-            return _ticket_dict(ticket)
+        )
+        await session.flush()
+        return _ticket_dict(ticket)
 
     async def get(self, ticket_id: str) -> dict[str, Any] | None:
         async with self.sessions() as session:

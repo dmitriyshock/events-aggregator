@@ -13,6 +13,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from events_aggregator.idempotency import IdempotencyRepository
 from events_aggregator.notifications import CapashinoClient
 from events_aggregator.outbox import OutboxWorker, PendingNotificationSender
 from events_aggregator.provider import EventsProviderClient, ProviderError
@@ -35,6 +36,14 @@ class TicketCreate(BaseModel):
     last_name: str = Field(min_length=1)
     email: EmailStr
     seat: str = Field(pattern=r"^[A-Z][1-9][0-9]*$")
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def nonblank_key(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Idempotency key cannot be blank")
+        return value
 
     @field_validator("first_name", "last_name")
     @classmethod
@@ -73,7 +82,13 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.settings = settings
     app.state.events = events
-    app.state.ticket_service = TicketService(events, tickets, provider, SeatsCache())
+    app.state.ticket_service = TicketService(
+        events,
+        tickets,
+        provider,
+        SeatsCache(),
+        IdempotencyRepository(sessions, settings.idempotency_ttl_seconds),
+    )
     app.state.sync_service = SyncService(events, sync_state, provider)
     app.state.sync_lock = asyncio.Lock()
     worker = asyncio.create_task(_daily_sync(app))
@@ -189,12 +204,18 @@ async def available_seats(event_id: str, request: Request) -> dict:
 
 @app.post("/api/tickets", status_code=201)
 async def create_ticket(payload: TicketCreate, request: Request) -> dict:
+    options = (
+        {"idempotency_key": payload.idempotency_key}
+        if payload.idempotency_key is not None
+        else {}
+    )
     ticket_id = await request.app.state.ticket_service.register(
         payload.event_id,
         payload.first_name.strip(),
         payload.last_name.strip(),
         str(payload.email),
         payload.seat,
+        **options,
     )
     return {"ticket_id": ticket_id}
 
