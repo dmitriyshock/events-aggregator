@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     outbox_batch_size: int = Field(default=50, ge=1, le=1000)
     outbox_retry_base_seconds: float = Field(default=5, gt=0)
     outbox_retry_max_seconds: float = Field(default=300, gt=0)
+    capashino_base_url: str = (
+        "http://student-system-capashino-web.student-system-capashino.svc:8000"
+    )
+    capashino_api_key: SecretStr | None = None
+    capashino_timeout_seconds: float = Field(default=10, gt=0)
 
     @property
     def async_database_url(self) -> str:
