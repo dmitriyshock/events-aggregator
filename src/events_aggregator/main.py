@@ -13,6 +13,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from events_aggregator.notifications import CapashinoClient
 from events_aggregator.outbox import OutboxWorker, PendingNotificationSender
 from events_aggregator.provider import EventsProviderClient, ProviderError
 from events_aggregator.services import DomainError, SeatsCache, TicketService
@@ -76,9 +77,20 @@ async def lifespan(app: FastAPI):
     app.state.sync_service = SyncService(events, sync_state, provider)
     app.state.sync_lock = asyncio.Lock()
     worker = asyncio.create_task(_daily_sync(app))
+    notifications = (
+        CapashinoClient(
+            settings.capashino_api_key.get_secret_value(),
+            settings.capashino_base_url,
+            timeout=settings.capashino_timeout_seconds,
+        )
+        if settings.capashino_api_key
+        else None
+    )
+    if notifications is None:
+        logger.warning("CAPASHINO_API_KEY missing; notifications remain pending")
     outbox = OutboxWorker(
         sessions,
-        PendingNotificationSender(),
+        notifications or PendingNotificationSender(),
         interval=settings.outbox_interval_seconds,
         batch_size=settings.outbox_batch_size,
         retry_base=settings.outbox_retry_base_seconds,
@@ -91,6 +103,8 @@ async def lifespan(app: FastAPI):
         worker.cancel()
         outbox_task.cancel()
         await asyncio.gather(worker, outbox_task, return_exceptions=True)
+        if notifications is not None:
+            await notifications.aclose()
         await provider.aclose()
         await engine.dispose()
 

@@ -24,7 +24,7 @@ Run the API locally:
 uv run uvicorn events_aggregator.main:app --reload
 ```
 
-## Part 2: durable outbox (stage 1)
+## Part 2: durable notifications
 
 Ticket creation commits the ticket and a `ticket.purchased` outbox record in one
 PostgreSQL transaction. The record includes the ticket ID, event name, seat,
@@ -38,8 +38,22 @@ database. PostgreSQL `FOR UPDATE SKIP LOCKED` coordinates multiple instances.
 Configuration: `OUTBOX_INTERVAL_SECONDS` (5), `OUTBOX_BATCH_SIZE` (50),
 `OUTBOX_RETRY_BASE_SECONDS` (5), `OUTBOX_RETRY_MAX_SECONDS` (300).
 Failed sends remain pending and retry with capped exponential backoff, without
-discarding records. This initial stage intentionally leaves notification delivery
-pending until the Capashino transport is connected in the next deployment.
+discarding records.
+
+The worker sends `POST /api/notifications` to Capashino with `X-API-Key`,
+`message`, `reference_id=ticket_id` and the persisted notification idempotency
+key. Retries reuse that same key, including after process restarts or an
+interrupted database commit. Only a confirmed HTTP 201 marks a record sent.
+Errors, including HTTP 409, remain pending; a conflict alone does not prove
+successful delivery.
+
+- `CAPASHINO_API_KEY`: portal profile API token; set in the service environment.
+- `CAPASHINO_BASE_URL`: defaults to the internal cluster service; use
+  `https://capashino.dev-2.python-labs.ru` for local access.
+- `CAPASHINO_TIMEOUT_SECONDS`: request timeout (10 seconds).
+
+Without the Capashino key the API remains available and notifications stay in
+the outbox until configuration is supplied and the service restarted.
 
 ## API endpoints
 
