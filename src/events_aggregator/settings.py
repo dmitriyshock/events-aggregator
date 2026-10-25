@@ -1,6 +1,6 @@
 """Application configuration loaded from environment variables."""
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     capashino_api_key: SecretStr | None = None
     capashino_timeout_seconds: float = Field(default=10, gt=0)
     idempotency_ttl_seconds: int = Field(default=86400, ge=1)
+    sentry_dsn: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("SENTRY_DSN", "GLITCHTIP_DSN")
+    )
+    app_environment: str = "production"
+    app_release: str | None = None
+    enable_error_test_endpoint: bool = False
 
     @property
     def async_database_url(self) -> str:
