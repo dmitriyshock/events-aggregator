@@ -7,14 +7,18 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from events_aggregator.idempotency import IdempotencyRepository
 from events_aggregator.outbox import OutboxWorker
+from events_aggregator.services import DomainError, SeatsCache, TicketService
 from events_aggregator.storage import (
     EventRepository,
+    IdempotencyRecord,
     OutboxEvent,
     SyncRepository,
+    Ticket,
     TicketRepository,
     create_schema,
 )
@@ -66,6 +70,76 @@ async def test_postgres_repositories_and_advisory_lock():
                 assert second is False
         async with state.sync_lock() as available_again:
             assert available_again is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_parallel_keyed_requests_across_service_instances():
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_async_engine(url, pool_size=3, max_overflow=0, pool_timeout=3)
+    schema = "keys_test_" + uuid4().hex
+    async with engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = engine.execution_options(schema_translate_map={None: schema})
+    await create_schema(engine)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    event_id = str(uuid4())
+    await EventRepository(sessions).upsert_many(
+        [
+            {
+                "id": event_id,
+                "name": "Concurrent test",
+                "status": "published",
+                "event_time": now + timedelta(days=1),
+                "registration_deadline": now + timedelta(hours=1),
+                "changed_at": now,
+                "place": {"seats_pattern": "A1-10"},
+            }
+        ]
+    )
+    provider = AsyncMock()
+    provider.seats.return_value = ["A1", "A2"]
+
+    async def register(*_args):
+        await asyncio.sleep(0.05)
+        return str(uuid4())
+
+    provider.register.side_effect = register
+
+    def service():
+        return TicketService(
+            EventRepository(sessions),
+            TicketRepository(sessions),
+            provider,
+            SeatsCache(),
+            IdempotencyRepository(sessions),
+        )
+
+    args = (event_id, "Ada", "Lovelace", "ada@example.com", "A1")
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *[
+                    service().register(*args, idempotency_key="parallel-key")
+                    for _ in range(12)
+                ]
+            ),
+            timeout=15,
+        )
+        assert len(set(results)) == 1
+        provider.register.assert_awaited_once()
+        with pytest.raises(DomainError) as conflict:
+            await service().register(*args[:-1], "A2", idempotency_key="parallel-key")
+        assert conflict.value.status_code == 409
+        async with sessions() as session:
+            for model in (Ticket, OutboxEvent, IdempotencyRecord):
+                assert (
+                    await session.scalar(select(func.count()).select_from(model)) == 1
+                )
     finally:
         await engine.dispose()
 
