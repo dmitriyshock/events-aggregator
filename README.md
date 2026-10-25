@@ -24,7 +24,24 @@ Run the API locally:
 uv run uvicorn events_aggregator.main:app --reload
 ```
 
-## API
+## Part 2: durable outbox (stage 1)
+
+Ticket creation commits the ticket and a `ticket.purchased` outbox record in one
+PostgreSQL transaction. The record includes the ticket ID, event name, seat,
+notification message and a stable notification idempotency key.
+
+The FastAPI lifespan starts the outbox worker as a background coroutine in the
+same process as the API. The Docker command starts both automatically. Shutdown
+cancels and awaits both the synchronization and outbox tasks before closing the
+database. PostgreSQL `FOR UPDATE SKIP LOCKED` coordinates multiple instances.
+
+Configuration: `OUTBOX_INTERVAL_SECONDS` (5), `OUTBOX_BATCH_SIZE` (50),
+`OUTBOX_RETRY_BASE_SECONDS` (5), `OUTBOX_RETRY_MAX_SECONDS` (300).
+Failed sends remain pending and retry with capped exponential backoff, without
+discarding records. This initial stage intentionally leaves notification delivery
+pending until the Capashino transport is connected in the next deployment.
+
+## API endpoints
 
 - `GET /api/health` — service health.
 - `POST /api/sync/trigger` — trigger event synchronization.

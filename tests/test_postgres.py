@@ -1,14 +1,19 @@
 """PostgreSQL integration checks used by CI when a database is available."""
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from events_aggregator.outbox import OutboxWorker
 from events_aggregator.storage import (
     EventRepository,
+    OutboxEvent,
     SyncRepository,
     TicketRepository,
     create_schema,
@@ -62,4 +67,52 @@ async def test_postgres_repositories_and_advisory_lock():
         async with state.sync_lock() as available_again:
             assert available_again is True
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_outbox_workers_skip_a_locked_record():
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_async_engine(url)
+    schema = "outbox_test_" + uuid4().hex
+    async with engine.begin() as connection:
+        await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = engine.execution_options(schema_translate_map={None: schema})
+    await create_schema(engine)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    row_id = str(uuid4())
+    async with sessions.begin() as session:
+        session.add(OutboxEvent(id=row_id, event_type="ticket.purchased", payload={}))
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def send(_payload):
+        started.set()
+        await release.wait()
+
+    sender = AsyncMock()
+    sender.send.side_effect = send
+    first = asyncio.create_task(OutboxWorker(sessions, sender).process_one())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # Another worker must return rather than sending the locked notification.
+        other = AsyncMock()
+        assert not await asyncio.wait_for(
+            OutboxWorker(sessions, other).process_one(), timeout=5
+        )
+        other.send.assert_not_awaited()
+        release.set()
+        assert await asyncio.wait_for(first, timeout=5)
+        async with sessions() as session:
+            row = await session.scalar(
+                select(OutboxEvent).where(OutboxEvent.id == row_id)
+            )
+            assert row.status == "sent"
+        sender.send.assert_awaited_once()
+    finally:
+        release.set()
+        if not first.done():
+            first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
         await engine.dispose()

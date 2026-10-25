@@ -13,6 +13,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from events_aggregator.outbox import OutboxWorker, PendingNotificationSender
 from events_aggregator.provider import EventsProviderClient, ProviderError
 from events_aggregator.services import DomainError, SeatsCache, TicketService
 from events_aggregator.settings import Settings
@@ -75,14 +76,21 @@ async def lifespan(app: FastAPI):
     app.state.sync_service = SyncService(events, sync_state, provider)
     app.state.sync_lock = asyncio.Lock()
     worker = asyncio.create_task(_daily_sync(app))
+    outbox = OutboxWorker(
+        sessions,
+        PendingNotificationSender(),
+        interval=settings.outbox_interval_seconds,
+        batch_size=settings.outbox_batch_size,
+        retry_base=settings.outbox_retry_base_seconds,
+        retry_max=settings.outbox_retry_max_seconds,
+    )
+    outbox_task = asyncio.create_task(outbox.run())
     try:
         yield
     finally:
         worker.cancel()
-        try:
-            await worker
-        except asyncio.CancelledError:
-            pass
+        outbox_task.cancel()
+        await asyncio.gather(worker, outbox_task, return_exceptions=True)
         await provider.aclose()
         await engine.dispose()
 
