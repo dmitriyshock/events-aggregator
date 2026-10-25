@@ -6,11 +6,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, time
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -82,6 +84,27 @@ class SyncState(Base):
     last_sync_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sync_status: Mapped[SyncStatus] = mapped_column(String(32), nullable=False)
     sync_error: Mapped[str | None] = mapped_column(Text)
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox"
+    __table_args__ = (
+        Index("ix_outbox_pending", "status", "next_attempt_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(200))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 async def create_schema(engine: AsyncEngine) -> None:
@@ -256,7 +279,27 @@ class TicketRepository:
             seat=seat,
         )
         async with self.sessions.begin() as session:
+            event = await session.get(Event, str(event_id))
+            event_name = event.name if event else str(event_id)
+            outbox_id = str(uuid4())
             session.add(ticket)
+            session.add(
+                OutboxEvent(
+                    id=outbox_id,
+                    event_type="ticket.purchased",
+                    payload={
+                        "ticket_id": str(ticket_id),
+                        "event_id": str(event_id),
+                        "event_name": event_name,
+                        "seat": seat,
+                        "message": (
+                            "Вы успешно зарегистрированы на мероприятие — "
+                            f"{event_name}. Место: {seat}."
+                        ),
+                        "idempotency_key": outbox_id,
+                    },
+                )
+            )
             await session.flush()
             return _ticket_dict(ticket)
 
